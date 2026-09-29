@@ -1,9 +1,14 @@
 Source: vyatta-client-ssh
-Section: contrib/net
+Section: net
 Priority: optional
-Maintainer: Vyatta Package Maintainers <DL-vyatta-help@att.com>
-Build-Depends: cpio, debhelper-compat (= 12), dh-yang
-Standards-Version: 3.9.6
+Maintainer: NuDanOS Maintainers <jon@fernandez.tech>
+Build-Depends: debhelper-compat (= 13),
+ cpio,
+ dh-yang
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Vcs-Git: https://github.com/nudanos/vyatta-client-ssh.git
+Vcs-Browser: https://github.com/nudanos/vyatta-client-ssh
 
 Package: vyatta-security-ssh-client-v1-yang
 Architecture: all
@@ -27,4 +32,3 @@ Conflicts: vyatta-cfg-system (<< 2.0), vyatta-service-ssh (<< 0.2)
 Replaces: vyatta-cfg-system (<< 2.0), vyatta-service-ssh (<< 0.2)
 Description: vyatta-security-ssh-known-hosts-routing-instance-v1 module
  routing-instance SSH known hosts configuration
-

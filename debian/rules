@@ -4,4 +4,4 @@
 #
 
 %:
-	dh $@ --with=yang
+	dh $@ --with yang
