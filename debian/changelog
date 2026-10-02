@@ -1,3 +1,10 @@
+vyatta-client-ssh (0.13) trixie; urgency=medium
+
+  * vyatta-security-ssh-client-v1-yang.postrm: remove the KEX/HKA files
+    postinst writes and their Include lines in ssh_config.
+
+ -- NuDanOS Maintainers <jon@fernandez.tech>  Fri, 02 Oct 2026 13:11:54 -0700
+
 vyatta-client-ssh (0.12) trixie; urgency=medium
 
   * Port to Debian 13 (trixie): debhelper-compat 13, Standards-Version 4.7.2, Rules-Requires-Root, NuDanOS Vcs.

@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+case "$1" in
+    remove|purge)
+        # postinst ("vyatta-security-ssh-client-update defaults") wrote these
+        # and appended Include lines for them to ssh_config
+        rm -f /etc/vyatta/ssh_kex_config /etc/vyatta/ssh_hka_config
+        rmdir /etc/vyatta 2>/dev/null || true
+        if [ -f /etc/ssh/ssh_config ]; then
+            sed -i '\#^Include /etc/vyatta/ssh_\(kex\|hka\)_config$#d' /etc/ssh/ssh_config
+        fi
+        ;;
+esac
+#DEBHELPER#
+exit 0
