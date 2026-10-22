@@ -9,47 +9,49 @@ import os
 import sys
 import syslog
 from subprocess import check_output
-from collections import OrderedDict
+
 from vyatta import configd
 
 GlobalSSHConfig = '/etc/ssh/ssh_config'
 CustomKEXConfig = '/etc/vyatta/ssh_kex_config'
 CustomHKAConfig = '/etc/vyatta/ssh_hka_config'
 
-disallowedKEXList = [ 'diffie-hellman-group1-sha1',
-                      'diffie-hellman-group14-sha1',
-                      'diffie-hellman-group-exchange-sha1' ]
+DISALLOWED_KEX = ['diffie-hellman-group1-sha1',
+                  'diffie-hellman-group14-sha1',
+                  'diffie-hellman-group-exchange-sha1']
 
-disallowedHKAList = [ 'ssh-dss' ]
+disallowedHKAList = ['ssh-dss']
+
 
 def update_global_config():
 
-    search = "Include {}\n".format(CustomHKAConfig)
-    with open(GlobalSSHConfig) as global_config:
+    search = f"Include {CustomHKAConfig}\n"
+    with open(GlobalSSHConfig, encoding='utf-8') as global_config:
         if any(line == search for line in global_config):
             return
-        else:
-            with open(GlobalSSHConfig, "a") as global_config:
-                global_config.write("Include /etc/vyatta/ssh_kex_config\n")
-                global_config.write("Include /etc/vyatta/ssh_hka_config\n")
+    with open(GlobalSSHConfig, "a", encoding='utf-8') as global_config:
+        global_config.write("Include /etc/vyatta/ssh_kex_config\n")
+        global_config.write("Include /etc/vyatta/ssh_hka_config\n")
+
 
 def get_config(name):
 
     try:
         configd_client = configd.Client()
     except configd.FatalException as f:
-        print("can't connect to configd: {}\n".format(f))
+        print(f"can't connect to configd: {f}\n")
         sys.exit(1)
 
     try:
         top_cfg = configd_client.tree_get_dict(
-            "security ssh-client permit {}".format(name),
+            f"security ssh-client permit {name}",
             configd.Client.CANDIDATE, "json")
         cfg = top_cfg[name]
     except configd.Exception:
         cfg = None
 
-    return(cfg)
+    return cfg
+
 
 #
 # Disable by default some legacy SSH Key Exchange Algorithms unless
@@ -58,34 +60,31 @@ def get_config(name):
 # if "default" is True, exclude the default set of weak algorithms
 # independent of configuration.
 #
-def update_kex(default = False):
-
-    global disallowedKEXList
+def update_kex(default=False):
 
     enabled = None if default else get_config('key-exchange-algorithm')
 
-    if not enabled is None:
-        disallowedKEXList = [a for a in disallowedKEXList if a not in enabled]
+    disallowed = DISALLOWED_KEX
+    if enabled is not None:
+        disallowed = [a for a in DISALLOWED_KEX if a not in enabled]
 
-    if not disallowedKEXList:
-        filtercmd = ''
-    else:
-        disallowed = "|".join(disallowedKEXList)
-        filtercmd = " | egrep -v '{}'".format(disallowed)
-
-    kex = check_output("ssh -Q kex {}" .format(filtercmd), shell=True)
-    kd = kex.decode("utf-8")
-    algs = kd.splitlines()
+    # filtered here, as "| egrep -v 'a|b|c'" did: drop any algorithm whose
+    # name contains a disallowed one (egrep is obsolete in trixie, and its
+    # exit status failed the pipeline when it dropped every line)
+    kex = check_output(["ssh", "-Q", "kex"]).decode("utf-8")
+    algs = [alg for alg in kex.splitlines()
+            if not any(d in alg for d in disallowed)]
     algstr = ",".join(algs)
 
-    with open(CustomKEXConfig, "w") as custom_config:
+    with open(CustomKEXConfig, "w", encoding='utf-8') as custom_config:
         custom_config.write("Host *\n")
-        custom_config.write("    KexAlgorithms {}\n".format(algstr))
+        custom_config.write(f"    KexAlgorithms {algstr}\n")
 
     if enabled:
         algstr = ",".join(enabled)
         syslog.syslog(syslog.LOG_WARNING,
-                  "SSH: Key Exchange Algorithms {} enabled.\n".format(algstr))
+                      f"SSH: Key Exchange Algorithms {algstr} enabled.\n")
+
 
 #
 # Configure some legacy SSH Host Key Algorithms
@@ -100,15 +99,15 @@ def update_hka():
         except OSError:
             pass
         return
-    else:
-        hka = hka[0]
+    hka = hka[0]
 
-    with open(CustomHKAConfig, "w") as custom_config:
+    with open(CustomHKAConfig, "w", encoding='utf-8') as custom_config:
         custom_config.write("Host *\n")
-        custom_config.write("    HostKeyAlgorithms +{}\n".format(hka))
+        custom_config.write(f"    HostKeyAlgorithms +{hka}\n")
 
     syslog.syslog(syslog.LOG_WARNING,
-                  "SSH: Legacy Host Key Algorithms {} enabled.\n".format(hka))
+                  f"SSH: Legacy Host Key Algorithms {hka} enabled.\n")
+
 
 if sys.argv[1] == 'defaults':
     if not os.path.isfile(CustomKEXConfig):
@@ -121,4 +120,3 @@ elif sys.argv[1] == 'update-legacy':
 
 else:
     print("No handler\n")
-

@@ -16,7 +16,7 @@ sub usage {
 
 sub is_valid_str {
     my $str = shift;
-    return ( length($str) < 256 and $str =~ /^[a-z0-9:_\-\.]*$/i );
+    return ( length($str) < 256 && $str =~ /^[a-z0-9:_\-\.]*$/ix );
 }
 
 my $host    = $ARGV[0];
@@ -27,7 +27,7 @@ die "host '$host' contains unusual characters or is too long\n"
   unless is_valid_str($host);
 
 die "routing instance '$ri_name' contains unusual characters or is too long\n"
-  unless !$ri_name or is_valid_str($ri_name);
+  if $ri_name && !is_valid_str($ri_name);
 
 my $known_hosts_file = $SSH_KNOWN_HOSTS;
 my $host_str         = "'$host'";
@@ -39,8 +39,7 @@ if ($ri_name) {
 
 die "no file for ssh known hosts found for $host_str\n" unless -f $known_hosts_file;
 
-my $host_to_delete =
-  ssh_get_host_to_delete( $known_hosts_file, $host );
+my $host_to_delete = ssh_get_host_to_delete( $known_hosts_file, $host );
 
 die "no entry found for $host_str\n" unless $host_to_delete;
 

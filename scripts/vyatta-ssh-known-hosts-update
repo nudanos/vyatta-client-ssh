@@ -10,101 +10,109 @@ use warnings;
 use lib '/opt/vyatta/share/perl5';
 use URI::Encode qw(uri_decode);
 use Vyatta::Configd;
-use Vyatta::SSHClient;
-
-my ( $rtcfg, $host, $action, $loadfile, $rtdomain );
-my $known_hosts_file = $SSH_KNOWN_HOSTS;
-my $cmdprefix        = "";
-my $is_hashed        = 0;
+use Vyatta::SSHClient qw(:DEFAULT ssh_command_output ssh_key_entry_fingerprint);
 
 my %actions = ( "fetch-from-server" => 1, "load-from-file" => 1 );
 
-my $configd_path = $ENV{'CONFIGD_PATH'}
-  or die "CONFIGD_PATH not in environment";
+# The host, action, file to load and routing instance from CONFIGD_PATH,
+# <rtcfg>/security/ssh-known-hosts/host/<host>/<action>[/<file>]
+sub parse_configd_path {
+    my $configd_path = $ENV{'CONFIGD_PATH'}
+      or die "CONFIGD_PATH not in environment\n";
 
-if ( $configd_path =~ "(.*)/security/ssh-known-hosts/host/([^/]+)/([^/]+)(.*)" )
-{
-    $rtcfg    = $1;
-    $host     = uri_decode $2;
-    $action   = $3;
-    $loadfile = uri_decode $4;
+    my ( $rtcfg, $host, $action, $loadfile ) =
+      ( $configd_path =~ m{(.*)/security/ssh-known-hosts/host/([^/]+)/([^/]+)(.*)}x )
+      or die "CONFIGD_PATH in wrong format\n";
+    $host     = uri_decode $host;
+    $loadfile = uri_decode $loadfile;
 
-    die "Unrecognized action '$action'" unless exists $actions{$action};
+    die "Unrecognized action '$action'\n" unless exists $actions{$action};
+    $loadfile =~ s{^/}{}x if $loadfile;
 
-    $is_hashed = 1 if $host =~ /^\|.*/;
-    $loadfile =~ s/^\/// if $loadfile;
-
+    my $rtdomain;
     if ($rtcfg) {
-        die "Unrecognized RT config '$rtcfg'"
-          unless $rtcfg =~ /\/routing\/routing-instance\/(.*)/;
-        $rtdomain         = uri_decode $1;
-        $cmdprefix        = "/usr/sbin/chvrf '$1' ";
-        $known_hosts_file = "/run/ssh/vrf/$rtdomain/ssh_known_hosts";
+        ($rtdomain) = ( $rtcfg =~ m{/routing/routing-instance/(.*)}x )
+          or die "Unrecognized RT config '$rtcfg'\n";
+        $rtdomain = uri_decode $rtdomain;
     }
-} else {
-    die "CONFIGD_PATH in wrong format";
+    return ( $host, $action, $loadfile, $rtdomain );
 }
 
-my $sid = $ENV{'VYATTA_CONFIG_SID'}
-  or die "VYATTA_CONFIG_SID not in environment";
+sub attach_config_session {
+    my $sid = $ENV{'VYATTA_CONFIG_SID'}
+      or die "VYATTA_CONFIG_SID not in environment\n";
 
-my $cfg_client = Vyatta::Configd::Client->new();
-die "Unable to connect to the Vyatta Configuration Daemon"
-  unless defined($cfg_client);
+    my $cfg_client = Vyatta::Configd::Client->new();
+    die "Unable to connect to the Vyatta Configuration Daemon\n"
+      unless defined($cfg_client);
 
-$cfg_client->session_attach("$sid");
-die "Configuration session does not exist"
-  unless $cfg_client->session_exists();
+    $cfg_client->session_attach("$sid");
+    die "Configuration session does not exist\n"
+      unless $cfg_client->session_exists();
+    return $cfg_client;
+}
 
-my @key_entries;
+# The server's keys of @SSH_KEY_TYPES, hashed, from ssh-keyscan (run in
+# the routing instance's VRF, if any); none if it finds none
+sub fetch_key_entries {
+    my ( $host, $rtdomain ) = @_;
 
-if ( "$action" eq "fetch-from-server" ) {
-
-    die "Unable to fetch from server, host is hashed\n" if $is_hashed;
-    my $key_req = join( ",", @SSH_KEY_TYPES );
-    @key_entries =
-      qx(${cmdprefix}/usr/bin/ssh-keyscan -H -t '$key_req' '$host' 2>/dev/null)
-      or exit 0;
+    die "Unable to fetch from server, host is hashed\n" if $host =~ /^[|]/x;
+    my @vrf = $rtdomain ? ( '/usr/sbin/chvrf', $rtdomain ) : ();
+    my @key_entries =
+      ssh_command_output( 1, @vrf, '/usr/bin/ssh-keyscan', '-H', '-t',
+        join( ",", @SSH_KEY_TYPES ), $host );
     chomp(@key_entries);
+    return @key_entries;
+}
 
-} elsif ( "$action" eq "load-from-file" ) {
+# The key entry for $host in $loadfile: the line ssh-keygen -F finds, or
+# the file's single entry under the configured host name
+sub load_key_entry {
+    my ( $host, $loadfile ) = @_;
 
     die "Invalid file path\n" unless -f $loadfile;
 
     # Legacy load-file expects a file with a single entry, and uses cfg'd host.
     # The following allows known hosts using hashes to be provided.
-    my $fp_output = qx(/usr/bin/ssh-keygen -l -f '$loadfile' -F '$host');
-    my $linenum   = 1;
-    my ( $key_entry, $found, $more );
+    my $fp_output =
+      ssh_command_output( 0, '/usr/bin/ssh-keygen', '-l', '-f', $loadfile, '-F', $host ) // q{};
+    my ($linenum) = ( $fp_output =~ /found:[ ]line[ ](\d+)/x );
+    my $found = defined $linenum;
+    $linenum //= 1;
 
-    if ( $fp_output =~ /(.*)found: line (\d+)(.*)/ ) {
-        $linenum = $2;
-        $found   = 1;
-    }
-
-    ( $key_entry, $more ) = ssh_get_line( $loadfile, $linenum );
+    my ( $key_entry, $more ) = ssh_get_line( $loadfile, $linenum );
 
     if ( !$found ) {
         die "File must have single entry if no host match\n" if $more;
-        $key_entry =~ s/^([^\s]*)/$host/;
+        $key_entry =~ s/^([^\s]*)/$host/x;
     }
 
-    qx(echo '$key_entry' | ssh-keygen -l -f -) or die "Invalid file format\n";
-
-    @key_entries = ($key_entry);
+    ssh_key_entry_fingerprint( $key_entry, '-l' )
+      or die "Invalid file format\n";
+    return $key_entry;
 }
+
+my ( $host, $action, $loadfile, $rtdomain ) = parse_configd_path();
+my $known_hosts_file = $rtdomain ? "/run/ssh/vrf/$rtdomain/ssh_known_hosts" : $SSH_KNOWN_HOSTS;
+my $cfg_client       = attach_config_session();
+
+my @key_entries =
+  $action eq "fetch-from-server"
+  ? fetch_key_entries( $host, $rtdomain )
+  : load_key_entry( $host, $loadfile );
+exit 0 unless @key_entries;
 
 my ( $key_entry, $stored_fp_str, $stored_fp_key_type ) =
   ssh_key_select( $known_hosts_file, $host, @key_entries );
 exit 0 unless $key_entry;
 
-my ( $hash, $key_type, $pub_key ) = split / /, $key_entry;
+my ( $hash, $key_type, $pub_key ) = split /[ ]/x, $key_entry;
 
 if ($stored_fp_str) {
     my $host_to_delete;
     if ( -f $known_hosts_file ) {
-        $host_to_delete =
-          ssh_get_host_to_delete( $known_hosts_file, $host, $stored_fp_str );
+        $host_to_delete = ssh_get_host_to_delete( $known_hosts_file, $host, $stored_fp_str );
     }
 
     # The entry in the ssh_known_hosts file was changed under us

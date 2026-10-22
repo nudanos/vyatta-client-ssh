@@ -10,27 +10,58 @@ package Vyatta::SSHClient;
 use strict;
 use warnings;
 use lib '/opt/vyatta/share/perl5';
+use File::Temp qw(tempfile);
 use Readonly;
 
 use parent 'Exporter';
 
-our @EXPORT =
-  qw($SSH_KNOWN_HOSTS @SSH_KEY_TYPES ssh_get_fingerprint ssh_key_select
+## no critic (Modules::ProhibitAutomaticExportation) reason: vyatta-image-tools and this package's scripts take these by default
+our @EXPORT = qw($SSH_KNOWN_HOSTS @SSH_KEY_TYPES ssh_get_fingerprint ssh_key_select
   ssh_get_line ssh_get_host_to_delete ssh_delete_config ssh_set_config);
+## use critic
+our @EXPORT_OK = qw(ssh_command_output ssh_key_entry_fingerprint);
 
 our $SSH_KNOWN_HOSTS = '/etc/ssh/ssh_known_hosts';
 
 # Curl does not support ECDSA, and DSA is not recommended
 our @SSH_KEY_TYPES = ( "RSA", "ED25519" );
 
+# The output of @cmd, run without a shell, as qx gave it: its lines in
+# list context, one string otherwise. Its stderr is discarded if $quiet.
+sub ssh_command_output {
+    my ( $quiet, @cmd ) = @_;
+    my $pid = open( my $out, '-|' );
+    return if !defined $pid;
+    if ( $pid == 0 ) {
+        if ($quiet) {
+            open( STDERR, '>', '/dev/null' ) or exit 127;
+        }
+        exec { $cmd[0] } @cmd or exit 127;
+    }
+    my @lines = <$out>;
+    close $out;
+    return wantarray ? @lines : join q{}, @lines;
+}
+
+# ssh-keygen's fingerprint line for a known_hosts entry, as
+# "echo '<entry>' | ssh-keygen <opts> -f -" gave it, without the shell
+# (an entry is not quoted safely inside '...')
+sub ssh_key_entry_fingerprint {
+    my ( $key_entry, @opts )    = @_;
+    my ( $tmp,       $tmpname ) = tempfile( UNLINK => 1 );
+    print {$tmp} "$key_entry\n";
+    close $tmp or return;
+    return scalar ssh_command_output( 0, 'ssh-keygen', @opts, '-f', $tmpname );
+}
+
 sub ssh_get_fingerprint {
     my $key_entry = shift;
 
     # Fingerprint fmt: <key length> <fingerprint str> <host hash> (<KEY TYPE>)
-    my $fingerprint = qx(echo '$key_entry' | ssh-keygen -qlf -);
+    my $fingerprint = ssh_key_entry_fingerprint( $key_entry, '-ql' );
     my ( $fp_str, $fp_key_type, $fp_hash ) =
-      ( split / /, $fingerprint )[ 1, 3, 2 ];
-    $fp_key_type =~ s/[()\n]+//g;
+      ( split /[ ]/x, $fingerprint )[ 1, 3, 2 ];
+    $fp_key_type =~ s/[()\n]+//gx;
 
     return ( $fp_str, $fp_key_type, $fp_hash );
 }
@@ -45,9 +76,9 @@ sub ssh_key_select {
     # Key entry fmt: <hash> <key type (e.g. ssh-rsa & ssh-ed25519)> <pub key>
     my %key_entries_map;
     foreach (@key_entries) {
-        my $key_type = ( split / /, $_ )[1];
-        $key_type =~ s/ssh-//;
-        $key_type =~ s/-.*//;
+        my $key_type = ( split /[ ]/x, $_ )[1];
+        $key_type =~ s/ssh-//x;
+        $key_type =~ s/-.*//x;
         $key_entries_map{ uc($key_type) } = $_;
     }
 
@@ -62,14 +93,14 @@ sub ssh_key_select {
     my $stored_fingerprint;
     if ( -f $known_hosts_file ) {
         $stored_fingerprint =
-          qx(ssh-keygen -q -l -F '$host' -f '$known_hosts_file');
+          ssh_command_output( 0, 'ssh-keygen', '-q', '-l', '-F', $host, '-f', $known_hosts_file );
     }
 
     return ( $key_entry, undef, undef ) unless $stored_fingerprint;
 
     # Stored fingerprint fmt: <host> <KEY TYPE> <fingerprint str>
     my ( $stored_fp_key_type, $stored_fp_str ) =
-      ( split / /, $stored_fingerprint )[ 1, 2 ];
+      ( split /[ ]/x, $stored_fingerprint )[ 1, 2 ];
     my $found_entry = $key_entries_map{$stored_fp_key_type};
     my ( $fp_str, $fp_key_type );
 
@@ -78,7 +109,8 @@ sub ssh_key_select {
 
         # Match stored key, no further action (curl will succeed)
         return ( undef, undef, undef ) if $fp_str eq $stored_fp_str;
-    } else {
+    }
+    else {
         foreach my $key_type ( keys %key_entries_map ) {
             if ( $key_type ne $stored_fp_key_type ) {
                 $found_entry = $key_entries_map{$key_type};
@@ -98,17 +130,13 @@ sub ssh_get_line {
     my $line;
 
     open( my $f, '<', $loadfile ) or return;
-    while (<$f>) {
-        if ( $. == $linenum ) {
-            $line = $_;
-            chomp($line);
-            $more = 0;
-        } elsif ( defined($more) ) {
-            $more = 1;
-            last;
-        }
-    }
+    my @lines = <$f>;
     close $f;
+    if ( $linenum >= 1 && $linenum <= @lines ) {
+        $line = $lines[ $linenum - 1 ];
+        chomp($line);
+        $more = ( @lines > $linenum ) ? 1 : 0;
+    }
     return ( $line, $more );
 }
 
@@ -120,12 +148,14 @@ sub ssh_get_line {
 # has not changed due to concurrent changes, then return stored hash from this.
 sub ssh_get_host_to_delete {
     my ( $known_hosts_file, $host, $req_fp_str ) = @_;
-    my $stored_fp = qx(ssh-keygen -l -f '$known_hosts_file' -F '$host');
-    return unless $stored_fp =~ /(.*)found: line (\d+)\s+(\S+)\s(\S+)\s(\S+)/;
+    my $stored_fp =
+      ssh_command_output( 0, 'ssh-keygen', '-l', '-f', $known_hosts_file, '-F', $host ) // q{};
+    return
+      unless $stored_fp =~ /(.*)found:[ ]line[ ](\d+)\s+(\S+)\s(\S+)\s(\S+)/x;
 
-    my $linenum = $2;
+    my $linenum      = $2;
     my $match_fp_str = $req_fp_str ? $req_fp_str : $5;
-    my ($key_entry) = ssh_get_line( $known_hosts_file, $linenum );
+    my ($key_entry)  = ssh_get_line( $known_hosts_file, $linenum );
     return unless $key_entry;
 
     my ( $fp_str, $fp_key_type, $fp_hash ) = ssh_get_fingerprint($key_entry);
@@ -149,14 +179,7 @@ sub ssh_set_config {
 
     @array = ( "routing", "routing-instance", $rtdomain )
       if length( $rtdomain // '' );
-    push(
-        @array,
-        (
-            "security", "ssh-known-hosts",
-            "host",     $host,
-            "key",      "$key_type $pub_key"
-        )
-    );
+    push( @array, ( "security", "ssh-known-hosts", "host", $host, "key", "$key_type $pub_key" ) );
     $cfg_client->set( \@array );
     return;
 }
