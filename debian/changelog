@@ -1,3 +1,12 @@
+vyatta-client-ssh (0.14) trixie; urgency=medium
+
+  * Code-quality lint fixes (distro docs/porting.md): analyzer findings
+    fixed, see the git log.
+  * ssh-keygen and ssh-keyscan run without a shell; the key exchange
+    filter no longer needs egrep.
+
+ -- NuDanOS Maintainers <jon@fernandez.tech>  Fri, 23 Oct 2026 12:17:29 +0000
+
 vyatta-client-ssh (0.13) trixie; urgency=medium
 
   * vyatta-security-ssh-client-v1-yang.postrm: remove the KEX/HKA files
